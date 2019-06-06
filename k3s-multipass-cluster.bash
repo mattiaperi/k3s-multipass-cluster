@@ -25,7 +25,6 @@ runcmd:
 EOF
 }
 
-SCRIPT_NAME=$(basename $0)
 K3S_NODEIP_MASTER=""
 K3S_TOKEN=""
 
@@ -98,9 +97,9 @@ k3s()
     if [[ ${LINE[0]} == *"worker"* ]]; then
       multipass launch --name ${LINE[0]} --cpus ${LINE[1]} --mem ${LINE[2]} --disk ${LINE[3]} --cloud-init <(k3s_worker_cloud_init)
       [ $? -eq 0 ] && success "Node ${LINE[0]} k3s creation: OK" || fatal "Node ${LINE[0]} creation: KO"
-      info "Node ${LINE[0]} k3s: Waiting to be ready"
-      multipass exec ${LINE[0]} -- /bin/bash -c 'while [[ $(k3s kubectl get nodes --no-headers 2>/dev/null | grep -c -v "NotReady") -eq 0 ]]; do echo -n .; sleep 2; done; echo'
-      success "Node ${LINE[0]} k3s: Ready"
+      # info "Node ${LINE[0]} k3s: Waiting to be ready"
+      # multipass exec ${LINE[0]} -- /bin/bash -c 'while [[ $(k3s kubectl get nodes --no-headers 2>/dev/null | grep -c -v "NotReady") -eq 0 ]]; do echo -n .; sleep 2; done; echo'
+      # success "Node ${LINE[0]} k3s: Ready"
     fi
   done < <(dictionary) 
 }
