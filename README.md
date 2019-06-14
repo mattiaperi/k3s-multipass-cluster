@@ -3,5 +3,5 @@
 - https://medium.com/@mattiaperi/kubernetes-cluster-with-k3s-and-multipass-7532361affa3
 
 ## how to
-`curl -sfL https://raw.githubusercontent.com/mattiape3s-multipass-cluster/master/k3s-multipass-cluster.bash | bash -`
+`curl -sfL https://raw.githubusercontent.com/mattiaperi/k3s-multipass-cluster/master/k3s-multipass-cluster.bash | bash -`
 

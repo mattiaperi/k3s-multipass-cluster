@@ -25,8 +25,8 @@ runcmd:
 EOF
 }
 
+KUBECONFIG_PATH="${HOME}/.kube/k3s.yaml"
 K3S_NODEIP_MASTER=""
-K3S_TOKEN=""
 LEADING_NODE=""
 KUBECTL_INSTALLED=""
 
@@ -72,7 +72,7 @@ check_prerequisite()
   ### Check brew installed
   [ ! -f "`command -v brew`" ] && fatal "brew not installed, visit https://brew.sh"
   ### Check kubectl installed
-  [ ! -f "`command -v kubectl`" ] && info "kubectl not installed, to install it: brew install kubernetes-cli" && KUBECTL_INSTALLED="0" || KUBECTL_INSTALLED="1"
+  [ ! -f "`command -v kubectl`" ] && info "kubectl not installed, to install it: brew install kubernetes-cli" && KUBECTL_INSTALLED="true" || KUBECTL_INSTALLED="false"
   success "Prerequisites: OK"
 }
 
@@ -135,32 +135,66 @@ k3s_setup()
   done < <(dictionary)
 }
 
-kubectl_configuration()
-{
-  if [ ${KUBECTL_INSTALLED} -eq 1 ]; then
-    multipass copy-files k3s-master:/etc/rancher/k3s/k3s.yaml ${HOME}/.kube/k3s.yaml
-    sed -ie s,https://localhost:6443,${K3S_NODEIP_MASTER},g ${HOME}/.kube/k3s.yaml
-    kubectl --kubeconfig=${HOME}/.kube/k3s.yaml get nodes
-    [ $? -eq 0 ] && success "kubectl configuration: OK" && info "Use i.e.: \"kubectl --kubeconfig=${HOME}/.kube/k3s.yaml get nodes\" or \"export KUBECONFIG="${HOME}/.kube/k3s.yaml"\"" || (fatal "kubectl configuration: KO")
-  else
-    info "kubectl not configured because not installed"
-  fi
-}
-
 k3s_labels()
 {
   ### nodes labels and taints
   while read -r -a LINE; do
     if [[ ${LINE[0]} == *"master"* ]]; then
-      info "=== DEBUG nodes labels and taints: ${LINE[0]}"
+      info "Node ${LINE[0]} labels and taints"
       multipass exec ${LINE[0]} -- /bin/bash -c 'kubectl label node $(hostname) node-role.kubernetes.io/master=""' < /dev/null
       multipass exec ${LINE[0]} -- /bin/bash -c 'kubectl taint node $(hostname) node-role.kubernetes.io/master=effect:NoSchedule' < /dev/null
     fi
     if [[ ${LINE[0]} == *"worker"* ]]; then
-      info "=== DEBUG nodes labels and taints: ${LINE[0]}"
+      info "Node ${LINE[0]} labels"
       multipass exec ${LEADING_NODE} -- /bin/bash -c "kubectl label node ${LINE[0]} node-role.kubernetes.io/node=\"\"" < /dev/null
     fi
   done < <(dictionary) 
+}
+
+kubectl_configuration()
+{
+  if [ ${KUBECTL_INSTALLED} ]; then
+      if [ -w ${KUBECONFIG_PATH} ]; then
+          multipass copy-files k3s-master:/etc/rancher/k3s/k3s.yaml ${KUBECONFIG_PATH}
+          sed -ie s,https://localhost:6443,${K3S_NODEIP_MASTER},g ${KUBECONFIG_PATH}
+          kubectl --kubeconfig=${KUBECONFIG_PATH} get nodes
+          [ $? -eq 0 ] && success "kubectl configuration: OK" && info "Use i.e.: \"kubectl --kubeconfig=${KUBECONFIG_PATH} get nodes\" or \"export KUBECONFIG="${KUBECONFIG_PATH}"\"" || (fatal "kubectl configuration: KO")
+        else
+          info "kubectl not configured because not \"${KUBECONFIG_PATH}\" not writable"
+      fi
+    else
+      info "kubectl not configured because not installed"
+  fi
+}
+
+helm_rbac_config() {
+cat << EOF | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tiller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tiller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: tiller
+    namespace: kube-system
+EOF
+}
+
+helm_install()
+{
+  ### install helm
+  helm_rbac_config
+  helm --kubeconfig=${KUBECONFIG_PATH} init --service-account tiller
 }
 
 clean()
@@ -168,11 +202,11 @@ clean()
   # Clean everything
   while read -r -a LINE; do
     multipass stop ${LINE[0]}
-    [ $? -eq 0 ] && success "Node stop ${LINE[0]}: OK" || (info "Node stop ${LINE[0]}: maybe it does not exist or it is already stopped")
+    [ $? -eq 0 ] && success "Node ${LINE[0]} stop: OK" || (info "Node ${LINE[0]} stop: maybe it does not exist or it is already stopped")
   done < <(dictionary)
   while read -r -a LINE; do
     multipass delete ${LINE[0]}
-    [ $? -eq 0 ] && success "Node delete ${LINE[0]}: OK" || (info "Node delete ${LINE[0]}: maybe it does not exist")
+    [ $? -eq 0 ] && success "Node ${LINE[0]} delete: OK" || (info "Node ${LINE[0]} delete: maybe it does not exist")
   done < <(dictionary)
   multipass purge
   [ $? -eq 0 ] && success "Nodes purge: OK" || (info "Nodes purge: KO")
@@ -184,5 +218,6 @@ clean()
 check_prerequisite
 installation_multipass
 k3s_setup
-kubectl_configuration
 k3s_labels
+kubectl_configuration
+helm_install
