@@ -27,6 +27,8 @@ EOF
 
 K3S_NODEIP_MASTER=""
 K3S_TOKEN=""
+LEADING_NODE=""
+KUBECTL_INSTALLED=""
 
 ### Functions
 
@@ -60,62 +62,106 @@ fatal()
     echo -e "${fmt_red}[ERROR]${fmt_end}" "$@"
     echo -e "${fmt_red}[ERROR]${fmt_end} Exiting with errors. Cleaning..."
     clean
-    exit 1
 }
 
+# --- prerequisite functions ---
 check_prerequisite()
 {
   ### Check osx running
   [[ ! "${OSTYPE}" == "darwin"* ]] && fatal "Prerequisites: Not running OSX"
   ### Check brew installed
-  [ ! -f "`which brew`" ] && fatal "Brew not installed"
+  [ ! -f "`command -v brew`" ] && fatal "brew not installed, visit https://brew.sh"
+  ### Check kubectl installed
+  [ ! -f "`command -v kubectl`" ] && info "kubectl not installed, to install it: brew install kubernetes-cli" && KUBECTL_INSTALLED="0" || KUBECTL_INSTALLED="1"
   success "Prerequisites: OK"
 }
 
 installation_multipass()
 {
   ### Install multipass
-  brew cask install multipass 2>/dev/null 
-  [ $? -eq 0 ] && success "Multipass installation: OK"
+  if command -v multipass > /dev/null 2>&1; then
+    success "Multipass installation: Already installed"
+  else
+    brew cask install multipass 2>/dev/null
+    [ $? -eq 0 ] && success "Multipass installation: OK" || (fatal "Multipass installation: KO")
+  fi
 }
 
-k3s()
+# --- k3s functions ---
+k3s_master_node()
 {
-  ### node creation and k3s configuration
+  K3S_NAME=$1
+  K3S_CPUS=$2
+  K3S_MEM=$3
+  K3S_DISK=$4
+
+  multipass launch --name ${K3S_NAME} --cpus ${K3S_CPUS} --mem ${K3S_MEM} --disk ${K3S_DISK} --cloud-init <(k3s_master_cloud_init)
+  [ $? -eq 0 ] && success "Node ${K3S_NAME} k3s creation: OK" || fatal "Node ${K3S_NAME} creation: KO"
+  info "Node ${K3S_NAME} k3s: Waiting to be ready"
+  multipass exec ${K3S_NAME} -- /bin/bash -c 'while [[ $(kubectl get nodes $(hostname) --no-headers 2>/dev/null | grep -c -w "Ready") -ne 1 ]]; do echo -n .; sleep 5; done; echo' < /dev/null
+  [ $? -eq 0 ] && success "Node ${K3S_NAME} k3s: Ready" || fatal "Node ${K3S_NAME} k3s: KO"
+}
+
+k3s_node()
+{
+  K3S_NAME=$1
+  K3S_CPUS=$2
+  K3S_MEM=$3
+  K3S_DISK=$4
+
+  multipass launch --name ${K3S_NAME} --cpus ${K3S_CPUS} --mem ${K3S_MEM} --disk ${K3S_DISK} --cloud-init <(k3s_worker_cloud_init)
+  [ $? -eq 0 ] && success "Node ${K3S_NAME} k3s creation: OK" || fatal "Node ${K3S_NAME} creation: KO"
+  info "Node ${K3S_NAME} k3s: Waiting to be ready"
+  # kubectl is configured only on master node
+  # we need double axes to pass variables to the string
+  # we need backslash on kubectl otherwise executed on host machine
+  multipass exec ${LEADING_NODE} -- /bin/bash -c "while [[ \$(kubectl get nodes ${K3S_NAME} --no-headers 2>/dev/null | grep -c -w \"Ready\") -ne 1 ]]; do echo -n .; sleep 5; done; echo" < /dev/null
+  [ $? -eq 0 ] && success "Node ${K3S_NAME} k3s: Ready" || fatal "Node ${K3S_NAME} k3s: KO"
+}
+
+k3s_setup()
+{
   while read -r -a LINE; do
+    info "Setup node: ${LINE[@]}"
     if [[ ${LINE[0]} == *"master"* ]]; then
-      multipass launch --name ${LINE[0]} --cpus ${LINE[1]} --mem ${LINE[2]} --disk ${LINE[3]} --cloud-init <(k3s_master_cloud_init)
-      [ $? -eq 0 ] && success "Node ${LINE[0]} k3s creation: OK" || fatal "Node ${LINE[0]} creation: KO"
-      info "Node ${LINE[0]} k3s: Waiting to be ready"
-      multipass exec ${LINE[0]} -- /bin/bash -c 'while [[ $(k3s kubectl get nodes --no-headers 2>/dev/null | grep -c -v "NotReady") -eq 0 ]]; do echo -n .; sleep 2; done; echo'
-      success "Node ${LINE[0]} k3s: Ready"
-      K3S_NODEIP_MASTER="https://$(multipass info ${LINE[0]} | grep "IPv4" | awk -F' ' '{print $2}'):6443" && info "Cluster URL: ${K3S_NODEIP_MASTER}"
-      K3S_TOKEN="$(multipass exec ${LINE[0]} -- /bin/bash -c "sudo cat /var/lib/rancher/k3s/server/node-token")" && info "K3S_TOKEN: ${K3S_TOKEN}"
+      k3s_master_node ${LINE[@]}
+      LEADING_NODE=${LINE[0]} && info "LEADING_NODE=${LEADING_NODE}"
+      K3S_NODEIP_MASTER="https://$(multipass info ${LEADING_NODE} | grep "IPv4" | awk -F' ' '{print $2}'):6443" && info "K3S_NODEIP_MASTER=${K3S_NODEIP_MASTER}"
+      K3S_TOKEN="$(multipass exec ${LEADING_NODE} -- /bin/bash -c "sudo cat /var/lib/rancher/k3s/server/node-token" < /dev/null)" && info "K3S_TOKEN=${K3S_TOKEN}"
     fi
-  done < <(dictionary) 
-  while read -r -a LINE; do
     if [[ ${LINE[0]} == *"worker"* ]]; then
-      multipass launch --name ${LINE[0]} --cpus ${LINE[1]} --mem ${LINE[2]} --disk ${LINE[3]} --cloud-init <(k3s_worker_cloud_init)
-      [ $? -eq 0 ] && success "Node ${LINE[0]} k3s creation: OK" || fatal "Node ${LINE[0]} creation: KO"
-      # info "Node ${LINE[0]} k3s: Waiting to be ready"
-      # multipass exec ${LINE[0]} -- /bin/bash -c 'while [[ $(k3s kubectl get nodes --no-headers 2>/dev/null | grep -c -v "NotReady") -eq 0 ]]; do echo -n .; sleep 2; done; echo'
-      # success "Node ${LINE[0]} k3s: Ready"
+      k3s_node ${LINE[@]}
     fi
-  done < <(dictionary) 
+  done < <(dictionary)
 }
 
 kubectl_configuration()
 {
-  multipass copy-files k3s-master:/etc/rancher/k3s/k3s.yaml ${HOME}/.kube/k3s.yaml
-  sed -i s,https://localhost:6443,${K3S_NODEIP_MASTER},g ${HOME}/.kube/k3s.yaml
-  kubectl --kubeconfig=${HOME}/.kube/k3s.yaml get nodes
-  [ $? -eq 0 ] && success "kubectl configuration: OK" && info "Use i.e.: \"kubectl --kubeconfig=${HOME}/.kube/k3s.yaml get nodes\"" || (fatal "kubectl configuration: KO")
+  if [ ${KUBECTL_INSTALLED} -eq 1 ]; then
+    multipass copy-files k3s-master:/etc/rancher/k3s/k3s.yaml ${HOME}/.kube/k3s.yaml
+    sed -ie s,https://localhost:6443,${K3S_NODEIP_MASTER},g ${HOME}/.kube/k3s.yaml
+    kubectl --kubeconfig=${HOME}/.kube/k3s.yaml get nodes
+    [ $? -eq 0 ] && success "kubectl configuration: OK" && info "Use i.e.: \"kubectl --kubeconfig=${HOME}/.kube/k3s.yaml get nodes\" or \"export KUBECONFIG="${HOME}/.kube/k3s.yaml"\"" || (fatal "kubectl configuration: KO")
+  else
+    info "kubectl not configured because not installed"
+  fi
 }
 
-# k3s_labels()
-# {
-
-# }
+k3s_labels()
+{
+  ### nodes labels and taints
+  while read -r -a LINE; do
+    if [[ ${LINE[0]} == *"master"* ]]; then
+      info "=== DEBUG nodes labels and taints: ${LINE[0]}"
+      multipass exec ${LINE[0]} -- /bin/bash -c 'kubectl label node $(hostname) node-role.kubernetes.io/master=""' < /dev/null
+      multipass exec ${LINE[0]} -- /bin/bash -c 'kubectl taint node $(hostname) node-role.kubernetes.io/master=effect:NoSchedule' < /dev/null
+    fi
+    if [[ ${LINE[0]} == *"worker"* ]]; then
+      info "=== DEBUG nodes labels and taints: ${LINE[0]}"
+      multipass exec ${LEADING_NODE} -- /bin/bash -c "kubectl label node ${LINE[0]} node-role.kubernetes.io/node=\"\"" < /dev/null
+    fi
+  done < <(dictionary) 
+}
 
 clean()
 {
@@ -130,13 +176,13 @@ clean()
   done < <(dictionary)
   multipass purge
   [ $? -eq 0 ] && success "Nodes purge: OK" || (info "Nodes purge: KO")
+  exit 1
 }
 
-### main
 
+# --- main script ---
 check_prerequisite
 installation_multipass
-k3s
+k3s_setup
 kubectl_configuration
-#clean
-
+k3s_labels
