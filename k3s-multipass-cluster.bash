@@ -190,12 +190,14 @@ subjects:
 EOF
 }
 
-helm_install()
-{
-  ### install helm
-  helm_rbac_config
-  helm --kubeconfig=${KUBECONFIG_PATH} init --service-account tiller
-}
+# WORK IN PROGRESS
+# helm_install()
+# {
+#   ### install helm
+#   multipass exec ${LEADING_NODE} -- /bin/bash -c "while [[ \$(kubectl get nodes ${K3S_NAME} --no-headers 2>/dev/null | grep -c -w \"Ready\") -ne 1 ]]; do echo -n .; sleep 5; done; echo" < /dev/null
+#   helm_rbac_config
+#   helm --kubeconfig=${KUBECONFIG_PATH} init --service-account tiller
+# }
 
 clean()
 {
@@ -220,4 +222,4 @@ installation_multipass
 k3s_setup
 k3s_labels
 kubectl_configuration
-helm_install
+#helm_install
