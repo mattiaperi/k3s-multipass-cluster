@@ -14,14 +14,14 @@ EOF
 k3s_master_cloud_init() {
 cat << EOF
 runcmd:
- - '\curl -sfL https://get.k3s.io | sh -'
+ - '\curl -sfL https://get.k3s.io | K3S_KUBECONFIG_MODE="644" sh -s - --node-taint node-role.kubernetes.io/master=effect:NoSchedule'
 EOF
 }
 
 k3s_worker_cloud_init() {
 cat << EOF
 runcmd:
- - '\curl -sfL https://get.k3s.io | K3S_TOKEN=${K3S_TOKEN} K3S_URL=${K3S_NODEIP_MASTER} sh -'
+ - '\curl -sfL https://get.k3s.io | K3S_TOKEN=${K3S_TOKEN} K3S_URL=${K3S_NODEIP_MASTER} sh -s -'
 EOF
 }
 
@@ -29,6 +29,7 @@ KUBECONFIG_PATH="${HOME}/.kube/k3s.yaml"
 K3S_NODEIP_MASTER=""
 LEADING_NODE=""
 KUBECTL_INSTALLED=""
+HELM_INSTALLED=""
 
 ### Functions
 
@@ -73,6 +74,8 @@ check_prerequisite()
   [ ! -f "`command -v brew`" ] && fatal "brew not installed, visit https://brew.sh"
   ### Check kubectl installed
   [ ! -f "`command -v kubectl`" ] && info "kubectl not installed, to install it: brew install kubernetes-cli" && KUBECTL_INSTALLED="true" || KUBECTL_INSTALLED="false"
+  ### Check helm installed
+  [ ! -f "`command -v helm`" ] && info "helm not installed, to install it: brew install kubernetes-helm" && HELM_INSTALLED="true" || HELM_INSTALLED="false"
   success "Prerequisites: OK"
 }
 
@@ -98,7 +101,8 @@ k3s_master_node()
   multipass launch --name ${K3S_NAME} --cpus ${K3S_CPUS} --mem ${K3S_MEM} --disk ${K3S_DISK} --cloud-init <(k3s_master_cloud_init)
   [ $? -eq 0 ] && success "Node ${K3S_NAME} k3s creation: OK" || fatal "Node ${K3S_NAME} creation: KO"
   info "Node ${K3S_NAME} k3s: Waiting to be ready"
-  multipass exec ${K3S_NAME} -- /bin/bash -c 'while [[ $(kubectl get nodes $(hostname) --no-headers 2>/dev/null | grep -c -w "Ready") -ne 1 ]]; do echo -n .; sleep 5; done; echo' < /dev/null
+#  multipass exec ${K3S_NAME} -- /bin/bash -c 'while [ ! -f /etc/rancher/k3s/k3s.yaml ]; do echo -n .; sleep 5; done; sudo chmod 644 /etc/rancher/k3s/k3s.yaml' < /dev/null #https://github.com/rancher/k3s/issues/389
+  multipass exec ${K3S_NAME} -- /bin/bash -c 'while [[ $(k3s kubectl get nodes $(hostname) --no-headers 2>/dev/null | grep -c -w "Ready") -ne 1 ]]; do echo -n .; sleep 5; done; echo' < /dev/null
   [ $? -eq 0 ] && success "Node ${K3S_NAME} k3s: Ready" || fatal "Node ${K3S_NAME} k3s: KO"
 }
 
@@ -135,7 +139,7 @@ k3s_setup()
   done < <(dictionary)
 }
 
-k3s_labels()
+k3s_labels() #OBSOLETE DUE TO: https://github.com/rancher/k3s/issues/379
 {
   ### nodes labels and taints
   while read -r -a LINE; do
@@ -155,15 +159,17 @@ kubectl_configuration()
 {
   if [ ${KUBECTL_INSTALLED} ]; then
       if [ -w ${KUBECONFIG_PATH} ]; then
-          multipass copy-files k3s-master:/etc/rancher/k3s/k3s.yaml ${KUBECONFIG_PATH}
+          multipass copy-files ${LEADING_NODE}:/etc/rancher/k3s/k3s.yaml ${KUBECONFIG_PATH}
           sed -ie s,https://localhost:6443,${K3S_NODEIP_MASTER},g ${KUBECONFIG_PATH}
           kubectl --kubeconfig=${KUBECONFIG_PATH} get nodes
           [ $? -eq 0 ] && success "kubectl configuration: OK" && info "Use i.e.: \"kubectl --kubeconfig=${KUBECONFIG_PATH} get nodes\" or \"export KUBECONFIG="${KUBECONFIG_PATH}"\"" || (fatal "kubectl configuration: KO")
         else
           info "kubectl not configured because not \"${KUBECONFIG_PATH}\" not writable"
+          info "Use i.e.: \"multipass exec ${LEADING_NODE} kubectl cluster-info\""
       fi
     else
       info "kubectl not configured because not installed"
+      info "Use i.e.: \"multipass exec ${LEADING_NODE} kubectl cluster-info\""
   fi
 }
 
@@ -190,13 +196,29 @@ subjects:
 EOF
 }
 
-# WORK IN PROGRESS
-# helm_install()
+helm_install()
+{
+  ### install helm
+  if [ ${HELM_INSTALLED} ]; then
+      helm_rbac_config
+      helm --kubeconfig=${KUBECONFIG_PATH} init --service-account tiller
+      info "Please wait for the tiller pod to be ready"
+    else
+      info "helm not configured because not installed"
+  fi
+}
+
+# WORK IN PROGRESS - STUCK AFTER 1ST COMMAND, TO BE TESTED AFTER REMOVING </dev/null
+# helm_install_2()
 # {
 #   ### install helm
-#   multipass exec ${LEADING_NODE} -- /bin/bash -c "while [[ \$(kubectl get nodes ${K3S_NAME} --no-headers 2>/dev/null | grep -c -w \"Ready\") -ne 1 ]]; do echo -n .; sleep 5; done; echo" < /dev/null
-#   helm_rbac_config
-#   helm --kubeconfig=${KUBECONFIG_PATH} init --service-account tiller
+#   multipass exec ${LEADING_NODE} -- /bin/bash -c "curl -L https://git.io/get_helm.sh | bash"
+#   echo "DEBUG1"
+#   multipass exec ${LEADING_NODE} -- /bin/bash -c "<(helm_rbac_config)"
+#   echo "DEBUG2"
+#   multipass exec ${LEADING_NODE} -- /bin/bash -c "helm --kubeconfig=${KUBECONFIG_PATH} init --service-account tiller"
+#   helm version
+#   [ $? -eq 0 ] && success "Node ${LINE[0]} helm installation: OK" || (info "Node ${LINE[0]} helm installation: KO")
 # }
 
 clean()
@@ -220,6 +242,6 @@ clean()
 check_prerequisite
 installation_multipass
 k3s_setup
-k3s_labels
+#k3s_labels
 kubectl_configuration
-#helm_install
+helm_install
