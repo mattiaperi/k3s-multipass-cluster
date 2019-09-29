@@ -8,10 +8,10 @@ cat << EOF
 k3s-master 1 1G 512M
 k3s-worker1 3 3G 5G
 k3s-worker2 3 3G 5G
-k3s-worker3 3 3G 5G
 EOF
 }
 # with 3G no space left during istio installation
+# k3s-worker3 3 3G 5G
 
 k3s_master_cloud_init() {
 cat << EOF
@@ -178,7 +178,9 @@ kubectl_configuration()
   if ${KUBECTL_INSTALLED}; then
       if [ -w ${KUBECONFIG_PATH} ]; then
           multipass copy-files ${LEADING_NODE}:/etc/rancher/k3s/k3s.yaml ${KUBECONFIG_PATH}
-          sed -ie s,https://localhost:6443,${K3S_URL},g ${KUBECONFIG_PATH}
+          # Managing both localhost and 127.0.0.1 since K3S 0.9.0: https://github.com/rancher/k3s/pull/750
+#          sed -ie s,https://localhost:6443,${K3S_URL},g ${KUBECONFIG_PATH}
+          sed -i -e "s|    server: https://127.0.0.1:6443|    #EDITED BY SCRIPT\n    server: ${K3S_URL}|" ${KUBECONFIG_PATH}
           kubectl --kubeconfig=${KUBECONFIG_PATH} get nodes
           [ $? -eq 0 ] && success "kubectl configuration: OK" && info "Use i.e.: \"kubectl --kubeconfig=${KUBECONFIG_PATH} get nodes\" or \"export KUBECONFIG="${KUBECONFIG_PATH}"\"" || (fatal "kubectl configuration: KO")
         else
