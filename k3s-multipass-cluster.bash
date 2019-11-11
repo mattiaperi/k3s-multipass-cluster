@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 
 dictionary() {
+# with 3G and 2 worker nodes no space left during istio installation
+# with 5G and 1 worker nodes no enough memory during istio installation
+# k3s-worker3 3 3G 5G
+
 # nodename must contains "master" or "worker" word
-# master must be just 1 and must be the first 
+# master must be just 1 and must be the first
 # nodename cpus memory disk
 cat << EOF
 k3s-master 1 1G 512M
@@ -10,8 +14,7 @@ k3s-worker1 3 3G 5G
 k3s-worker2 3 3G 5G
 EOF
 }
-# with 3G no space left during istio installation
-# k3s-worker3 3 3G 5G
+
 
 k3s_master_cloud_init() {
 cat << EOF
@@ -278,6 +281,8 @@ metrics-server_install()
   kubectl --kubeconfig=${KUBECONFIG_PATH} rollout status deployment metrics-server --namespace kube-system -w
   [ $? -eq 0 ] && success "[metrics-server] installation: OK" || fatal "[metrics-server] installation: KO"
   rm -rf $TMP_DIR
+  info "[metrics-server] Awaiting for the server to be ready (and avoid \"the server is currently unable to handle the request\" error)"
+  until kubectl --kubeconfig=${KUBECONFIG_PATH} top nodes >/dev/null 2>&1; do echo -n .; sleep 5; done; echo; info "[metrics-server] installation: server up & running"
 }
 
 weave-scope_install()
@@ -430,21 +435,22 @@ istio_install()
       helm repo add istio.io https://storage.googleapis.com/istio-release/releases/1.2.0/charts/
       info "[istio.io] Installing required CRDs"
       helm --kubeconfig=${KUBECONFIG_PATH} install --name istio-init --namespace istio-system istio.io/istio-init --wait --timeout 300
-      while [ $(kubectl --kubeconfig=${KUBECONFIG_PATH} get crds | grep 'istio.io\|certmanager.k8s.io' | wc -l | xargs 2>/dev/null) -ne 23 ]; do echo -n .; sleep 5; done; info "[istio.io] Required CRDs have been committed"
+      while [ $(kubectl --kubeconfig=${KUBECONFIG_PATH} get crds | grep 'istio.io\|certmanager.k8s.io' | wc -l | xargs 2>/dev/null) -ne 23 ]; do echo -n .; sleep 5; done; echo; info "[istio.io] Required CRDs have been committed"
       info "[istio.io] Install chart"
       # --set kiali.enabled=true
       helm --kubeconfig=${KUBECONFIG_PATH} install --name istio --namespace istio-system --set grafana.enabled=true istio.io/istio --wait --timeout 600
+      [ $? -eq 0 ] && success "[istio.io] installation: OK" || info "[istio.io] installation: KO *********** CHECK IS NEEDED ***********"
       info "[istio.io] Enabling the creation of Envoy proxies for automatic sidecar injection"
       kubectl --kubeconfig=${KUBECONFIG_PATH} label namespace default istio-injection=enabled
       kubectl --kubeconfig=${KUBECONFIG_PATH} get namespace -L istio-injection
       info "[istio.io] Creating Istio Objects"
       istio_grafana_gateway
       istio_grafana_virtualservice
-      while [ $(curl -o /dev/null -w "%{http_code}\n" -sSLIk "http://${K3S_NODEIP_WORKER}:15031" 2>/dev/null) -ne 200 ]; do echo -n .; sleep 5; done; info "[istio.io] Istio graphana: http://${K3S_NODEIP_WORKER}:15031"
+      while [ $(curl -o /dev/null -w "%{http_code}\n" -sSLIk "http://${K3S_NODEIP_WORKER}:15031" 2>/dev/null) -ne 200 ]; do echo -n .; sleep 5; done; echo; info "[istio.io] Istio graphana: http://${K3S_NODEIP_WORKER}:15031"
       istio_nginx_gateway
       istio_nginx_virtualservice
       nginx
-      while [ $(curl -o /dev/null -w "%{http_code}\n" -sSLIk "http://${K3S_NODEIP_WORKER}" 2>/dev/null) -ne 200 ]; do echo -n .; sleep 5; done; info "[istio.io] nginx: http://${K3S_NODEIP_WORKER}"
+      while [ $(curl -o /dev/null -w "%{http_code}\n" -sSLIk "http://${K3S_NODEIP_WORKER}" 2>/dev/null) -ne 200 ]; do echo -n .; sleep 5; done; echo; info "[istio.io] nginx: http://${K3S_NODEIP_WORKER}"
     else
       info "[istio.io] istio not configured because helm is not installed"
   fi
