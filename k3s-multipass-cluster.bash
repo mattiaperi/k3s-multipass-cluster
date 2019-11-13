@@ -438,6 +438,8 @@ istio_install()
       while [ $(kubectl --kubeconfig=${KUBECONFIG_PATH} get crds | grep 'istio.io\|certmanager.k8s.io' | wc -l | xargs 2>/dev/null) -ne 23 ]; do echo -n .; sleep 5; done; echo; info "[istio.io] Required CRDs have been committed"
       info "[istio.io] Install chart"
       # --set kiali.enabled=true
+      # HELM BUG: https://github.com/helm/helm/issues/6894 Helm v2.16.0 --> Error: no kind "Job" is registered for version "batch/v1" in scheme "k8s.io/kubernetes/pkg/api/legacyscheme/scheme.go:30"
+      # WAITING TO BE FIXED
       helm --kubeconfig=${KUBECONFIG_PATH} install --name istio --namespace istio-system --set grafana.enabled=true istio.io/istio --wait --timeout 600
       [ $? -eq 0 ] && success "[istio.io] installation: OK" || info "[istio.io] installation: KO *********** CHECK IS NEEDED ***********"
       info "[istio.io] Enabling the creation of Envoy proxies for automatic sidecar injection"
