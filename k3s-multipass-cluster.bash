@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+INSTALL_K3S_VERSION=v1.17.2+k3s1
+
 dictionary() {
 # with 3G and 2 worker nodes no space left during istio installation
 # with 5G and 1 worker nodes no enough memory during istio installation
@@ -9,7 +11,7 @@ dictionary() {
 # master must be just 1 and must be the first
 # nodename cpus memory disk
 cat << EOF
-k3s-master 1 1G 512M
+k3s-master 2 2G 1G
 k3s-worker1 3 3G 5G
 k3s-worker2 3 3G 5G
 EOF
@@ -20,7 +22,7 @@ k3s_master_cloud_init() {
 cat << EOF
 #cloud-config
 runcmd:
- - '\curl -sfL https://get.k3s.io | K3S_KUBECONFIG_MODE="644" sh -s - --node-taint node-role.kubernetes.io/master=effect:NoSchedule --no-deploy=traefik'
+ - '\curl -sfL https://get.k3s.io | K3S_KUBECONFIG_MODE="644" INSTALL_K3S_VERSION=${INSTALL_K3S_VERSION} sh -s - --node-taint node-role.kubernetes.io/master=effect:NoSchedule --no-deploy=traefik'
 EOF
 }
 
@@ -28,15 +30,18 @@ k3s_worker_cloud_init() {
 cat << EOF
 #cloud-config
 runcmd:
- - '\curl -sfL https://get.k3s.io | K3S_TOKEN=${K3S_TOKEN} K3S_URL=${K3S_URL} sh -s -'
+ - '\curl -sfL https://get.k3s.io | K3S_TOKEN=${K3S_TOKEN} INSTALL_K3S_VERSION=${INSTALL_K3S_VERSION} K3S_URL=${K3S_URL} sh -s -'
 EOF
 }
 
+BASENAME=${0##*/}
+set -o allexport
 KUBECONFIG_PATH="${HOME}/.kube/k3s.yaml"
 K3S_NODEIP_MASTER=""
 K3S_URL=""
 LEADING_NODE=""
 K3S_NODEIP_WORKER=""
+set +o allexport
 KUBECTL_INSTALLED=""
 HELM_INSTALLED=""
 INSTALL_K3S_EXEC_WORKER=""#"--no-deploy=traefik --no-deploy=servicelb"
@@ -72,18 +77,61 @@ fatal()
 {
     echo -e "${fmt_red}[ERROR]${fmt_end}" "$@"
     echo -e "${fmt_red}[ERROR]${fmt_end} Exiting with errors. Cleaning..."
-    clean
+    cleanup
 }
+
+
+# --- fail_trap is executed if an error occurs. --- ### NEXT IMPROVEMENT
+# fail_trap() {
+#   result=$?
+#   if [ "$result" != "0" ]; then
+#     if [[ -n "$INPUT_ARGUMENTS" ]]; then
+#       echo "Failed to install $BASENAME with the arguments provided: $INPUT_ARGUMENTS"
+#       help
+#     else
+#       echo "Failed to install $BASENAME"
+#     fi
+#     echo -e "\tFor support, go to https://github.com/mattiaperi/k3s-multipass-cluster/."
+#   fi
+#   cleanup
+#   exit $result
+# }
 
 # --- prerequisite functions ---
-
 check_root() {
-    if [[ $USER == root || $HOME == /root ]] ; then
-        fatal "Please don't run as root"
-        info "Sudo will be used internally by this script as required."
-        exit 1
-    fi
+  if [[ $USER == root || $HOME == /root ]] ; then
+    fatal "Please don't run as root"
+    info "Sudo will be used internally by this script as required."
+    exit 1
+  fi
 }
+
+# --- Check if a required variable is set 
+# Use it without the $, as in:
+#   require_env_var VARIABLE_NAME  
+# or   
+#   require_env_var VARIABLE_NAME "Some description of the variable"
+function require_var {
+  var_name="${1:-}"
+  if [ -z "${!var_name:-}" ]; then
+    info "The required variable ${var_name} is empty"
+    if [ ! -z "${2:-}" ]; then        
+       info "  - $2"     
+    fi
+    exit 1
+  fi
+}
+
+# Check to see that we have a required binary on the path --- ### NEXT IMPROVEMENT
+# function require_binary {
+#   if [ -z "${1:-}" ]; then
+#     echo "${FUNCNAME[0]} requires an argument"
+#     exit 1
+#   fi  if ! [ -x "$(command -v "$1")" ]; then
+#     echo "The required executable '$1' is not on the path."
+#     exit 1
+#   fi
+# }
 
 check_prerequisite()
 {
@@ -107,6 +155,16 @@ installation_multipass()
     brew cask install multipass 2>/dev/null
     [ $? -eq 0 ] && success "Multipass installation: OK" || (fatal "Multipass installation: KO")
   fi
+}
+
+# --- release info ---
+k3s_release_info()
+{
+  require_var INSTALL_K3S_VERSION "INSTALL_K3S_VERSION must be defined"
+  LATEST_K3S_VERSION=$(curl -s https://api.github.com/repos/rancher/k3s/releases/latest | grep -o '"tag_name": "[^"]*' | grep -o '[^"]*$')
+  info "Latest release: $(echo ${LATEST_K3S_VERSION})"
+  [[ "${LATEST_K3S_VERSION}" == "${INSTALL_K3S_VERSION}" ]] && success "Installing latest release" || info "A newer release is available, installing ${INSTALL_K3S_VERSION}"
+  info "$(curl -s https://api.github.com/repos/rancher/k3s/releases/tags/${INSTALL_K3S_VERSION} | jq -r '.body')"
 }
 
 # --- k3s functions ---
@@ -160,14 +218,16 @@ k3s_setup()
   done < <(dictionary)
 }
 
-k3s_labels() #OBSOLETE DUE TO: https://github.com/rancher/k3s/issues/379
+k3s_labels()
+#OBSOLETE DUE TO: https://github.com/rancher/k3s/issues/379
+#NOT-SO-OBSOLETE ANYMORE, DUE TO: https://github.com/kubernetes/kubernetes/issues/55232
 {
   ### nodes labels and taints
   while read -r -a LINE; do
     if [[ ${LINE[0]} == *"master"* ]]; then
       info "Node ${LINE[0]} labels and taints"
-      multipass exec ${LINE[0]} -- /bin/bash -c 'kubectl label node $(hostname) node-role.kubernetes.io/master=""' < /dev/null
-      multipass exec ${LINE[0]} -- /bin/bash -c 'kubectl taint node $(hostname) node-role.kubernetes.io/master=effect:NoSchedule' < /dev/null
+      # multipass exec ${LINE[0]} -- /bin/bash -c 'kubectl label node $(hostname) node-role.kubernetes.io/master=""' < /dev/null
+      # multipass exec ${LINE[0]} -- /bin/bash -c 'kubectl taint node $(hostname) node-role.kubernetes.io/master=effect:NoSchedule' < /dev/null
     fi
     if [[ ${LINE[0]} == *"worker"* ]]; then
       info "Node ${LINE[0]} labels"
@@ -182,7 +242,7 @@ kubectl_configuration()
       if [ -w ${KUBECONFIG_PATH} ]; then
           multipass copy-files ${LEADING_NODE}:/etc/rancher/k3s/k3s.yaml ${KUBECONFIG_PATH}
           # Managing both localhost and 127.0.0.1 since K3S 0.9.0: https://github.com/rancher/k3s/pull/750
-#          sed -ie s,https://localhost:6443,${K3S_URL},g ${KUBECONFIG_PATH}
+          # sed -ie s,https://localhost:6443,${K3S_URL},g ${KUBECONFIG_PATH}
           sed -i -e "s|    server: https://127.0.0.1:6443|    #EDITED BY SCRIPT\n    server: ${K3S_URL}|" ${KUBECONFIG_PATH}
           kubectl --kubeconfig=${KUBECONFIG_PATH} get nodes
           [ $? -eq 0 ] && success "kubectl configuration: OK" && info "Use i.e.: \"kubectl --kubeconfig=${KUBECONFIG_PATH} get nodes\" or \"export KUBECONFIG="${KUBECONFIG_PATH}"\"" || (fatal "kubectl configuration: KO")
@@ -219,33 +279,24 @@ subjects:
 EOF
 }
 
-helm_install()
+dashboard_install()
 {
-  ### install helm
-  if ${HELM_INSTALLED}; then
-      info "[helm] Install"
-      helm_rbac_config
-      helm --kubeconfig=${KUBECONFIG_PATH} init --service-account tiller
-      info "[helm] Please wait for the tiller pod to be ready"
-      kubectl --kubeconfig=${KUBECONFIG_PATH} rollout status deployment tiller-deploy --namespace=kube-system -w
-      [ $? -eq 0 ] && success "[helm] installation: OK" || fatal "[helm] installation: KO"
-    else
-      info "[helm] helm not configured because not installed"
-  fi
+  [[ -n $DASHBOARD ]] || return 0
+    #ref: https://kubernetes.io/docs/tasks/access-application-cluster/web-ui-dashboard/#deploying-the-dashboard-ui
+    kubectl --kubeconfig=${KUBECONFIG_PATH} apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.0.0-beta8/aio/deploy/recommended.yaml
+    # Create the dashboard service account
+    kubectl --kubeconfig=${KUBECONFIG_PATH} create serviceaccount dashboard-admin-sa
+    # Bind the dashboard-admin-service-account service account to the cluster-admin role
+    kubectl --kubeconfig=${KUBECONFIG_PATH} create clusterrolebinding dashboard-admin-sa --clusterrole=cluster-admin --serviceaccount=default:dashboard-admin-sa
+    # Get the complete secret name starting from a partial name
+    SECRET_NAME=$(kubectl --kubeconfig=${KUBECONFIG_PATH} get secrets | awk '/^dashboard-admin-sa/ {printf $1;exit}') && info "SECRET_NAME=${SECRET_NAME}"
+    #SECRET_TOKEN=$(kubectl --kubeconfig=${KUBECONFIG_PATH} get secret ${SECRET_NAME} -o json | jq -r '.data.token') && info "SECRET_TOKEN=${SECRET_TOKEN}"
+    SECRET_TOKEN=$(kubectl --kubeconfig=${KUBECONFIG_PATH} get secret ${SECRET_NAME} -o jsonpath="{.data.token}" | base64 --decode) && info "SECRET_TOKEN=${SECRET_TOKEN}"
+    #nohup kubectl --kubeconfig=${KUBECONFIG_PATH} proxy >/dev/null 2>&1 &
+    info "Run:    $ kubectl --kubeconfig=/Users/perim/.kube/k3s.yaml proxy"
+    info "Open:   http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"
+    info "Token:  ${SECRET_TOKEN}"
 }
-
-# WORK IN PROGRESS - STUCK AFTER 1ST COMMAND, TO BE TESTED AFTER REMOVING </dev/null
-# helm_install_2()
-# {
-#   ### install helm
-#   multipass exec ${LEADING_NODE} -- /bin/bash -c "curl -L https://git.io/get_helm.sh | bash"
-#   echo "DEBUG1"
-#   multipass exec ${LEADING_NODE} -- /bin/bash -c "<(helm_rbac_config)"
-#   echo "DEBUG2"
-#   multipass exec ${LEADING_NODE} -- /bin/bash -c "helm --kubeconfig=${KUBECONFIG_PATH} init --service-account tiller"
-#   helm version
-#   [ $? -eq 0 ] && success "Node ${LINE[0]} helm installation: OK" || (info "Node ${LINE[0]} helm installation: KO")
-# }
 
 metrics-server_rbac_config() {
 cat << EOF | kubectl --kubeconfig=${KUBECONFIG_PATH} apply -f -
@@ -297,10 +348,20 @@ weave-scope_install()
 
 prometheus-operator_install() {
   [[ -n $PROMETHEUS ]] || return 0
+  info "[prometheus] Create \"monitoring\" namespace"
+  kubectl --kubeconfig=${KUBECONFIG_PATH} create namespace monitoring
+  info "[prometheus] Add helm stable repository"
+  helm repo add stable https://kubernetes-charts.storage.googleapis.com
+  info "[prometheus] Install CRDs https://github.com/helm/charts/tree/master/stable/prometheus-operator#helm-fails-to-create-crds"
+  kubectl --kubeconfig=${KUBECONFIG_PATH} apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/monitoring.coreos.com_alertmanagers.yaml
+  kubectl --kubeconfig=${KUBECONFIG_PATH} apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/monitoring.coreos.com_prometheuses.yaml
+  kubectl --kubeconfig=${KUBECONFIG_PATH} apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/monitoring.coreos.com_prometheusrules.yaml
+  kubectl --kubeconfig=${KUBECONFIG_PATH} apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+  kubectl --kubeconfig=${KUBECONFIG_PATH} apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml
   info "[prometheus] Install"
-  helm --kubeconfig=${KUBECONFIG_PATH} install -n prometheus-operator --namespace monitoring stable/prometheus-operator --set grafana.service.type=NodePort --set grafana.service.nodePort=30808 --set prometheus.service.type=NodePort --set prometheus.service.nodePort=30909 --set kubelet.serviceMonitor.https=true --wait --timeout 300
+  helm --kubeconfig=${KUBECONFIG_PATH} install prometheus-operator stable/prometheus-operator --namespace monitoring --set prometheusOperator.createCustomResource=false --set grafana.service.type=NodePort --set grafana.service.nodePort=30808 --set prometheus.service.type=NodePort --set prometheus.service.nodePort=30909 --set kubelet.serviceMonitor.https=true --wait --timeout 300s
   [ $? -eq 0 ] && success "[prometheus] installation: OK" || fatal "[prometheus] installation: KO"
-  info "[prometheus] URL Grafana: http://${K3S_NODEIP_MASTER}:$(kubectl --kubeconfig=${KUBECONFIG_PATH} get services prometheus-operator-grafana --namespace monitoring -o jsonpath="{.spec.ports[0].nodePort}"), user: \"$(kubectl get secrets prometheus-operator-grafana --namespace monitoring -o jsonpath='{.data.admin-user}' | base64 --decode)\", pwd: \"$(kubectl get secrets prometheus-operator-grafana --namespace monitoring -o jsonpath='{.data.admin-password}' | base64 --decode)\""
+  info "[prometheus] URL Grafana: http://${K3S_NODEIP_MASTER}:$(kubectl --kubeconfig=${KUBECONFIG_PATH} get services prometheus-operator-grafana --namespace monitoring -o jsonpath="{.spec.ports[0].nodePort}"), user: \"$(kubectl --kubeconfig=${KUBECONFIG_PATH} get secrets prometheus-operator-grafana --namespace monitoring -o jsonpath='{.data.admin-user}' | base64 --decode)\", pwd: \"$(kubectl --kubeconfig=${KUBECONFIG_PATH} get secrets prometheus-operator-grafana --namespace monitoring -o jsonpath='{.data.admin-password}' | base64 --decode)\""
   info "[prometheus] URL Prometheus: http://${K3S_NODEIP_MASTER}:$(kubectl --kubeconfig=${KUBECONFIG_PATH} get services prometheus-operator-prometheus --namespace monitoring -o jsonpath="{.spec.ports[0].nodePort}")"
 }
 
@@ -429,12 +490,14 @@ EOF
 istio_install()
 {
   [[ -n $ISTIO ]] || return 0
-  if ${HELM_INSTALLED}; then
+    if ${HELM_INSTALLED}; then
       info "[istio.io] Installation ref: https://istio.io/docs/setup/kubernetes/install/helm/"
+      info "[istio.io] Create \"istio-system\" namespace"
+      kubectl --kubeconfig=${KUBECONFIG_PATH} create namespace istio-system
       info "[istio.io] Adding helm repo"
       helm repo add istio.io https://storage.googleapis.com/istio-release/releases/1.2.0/charts/
       info "[istio.io] Installing required CRDs"
-      helm --kubeconfig=${KUBECONFIG_PATH} install --name istio-init --namespace istio-system istio.io/istio-init --wait --timeout 300
+      helm --kubeconfig=${KUBECONFIG_PATH} install istio-init --namespace istio-system istio.io/istio-init --wait --timeout 300s
       while [ $(kubectl --kubeconfig=${KUBECONFIG_PATH} get crds | grep 'istio.io\|certmanager.k8s.io' | wc -l | xargs 2>/dev/null) -ne 23 ]; do echo -n .; sleep 5; done; echo; info "[istio.io] Required CRDs have been committed"
       info "[istio.io] Install chart"
       # --set kiali.enabled=true
@@ -458,9 +521,9 @@ istio_install()
   fi
 }
 
-clean()
+cleanup()
 {
-  # Clean everything
+  # Cleanup everything
   while read -r -a LINE; do
     multipass stop ${LINE[0]}
     [ $? -eq 0 ] && success "Node ${LINE[0]} stop: OK" || (info "Node ${LINE[0]} stop: maybe it does not exist or it is already stopped")
@@ -474,15 +537,55 @@ clean()
   exit 1
 }
 
+# --- help ---
+help () {
+  echo "${BASENAME} accepted CLI arguments are:"
+  echo -e "\t[--help|-h ]\tprints this help"
+  # echo -e "\t[--version|-v <desired_version>] . When not defined it defaults to latest"
+  # echo -e "\te.g. --version v2.4.0  or -v latest"
+}
 
 # --- main script ---
+# # Stop execution on any error
+# trap "fail_trap" EXIT
+# set -e
+
+# Parsing input arguments (if any)
+export INPUT_ARGUMENTS="${@}"
+set -u
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    # '--version'|-v)
+    #    shift
+    #    if [[ $# -ne 0 ]]; then
+    #        export DESIRED_VERSION="${1}"
+    #    else
+    #        echo -e "Please provide the desired version. e.g. --version v2.4.0 or -v latest"
+    #        exit 0
+    #    fi
+    #    ;;
+    '--help'|-h)
+       help
+       exit 0
+       ;;
+    *) exit 1
+       ;;
+  esac
+  shift
+done
+set +u
+
+# Functions
 check_root
 check_prerequisite
 installation_multipass
+k3s_release_info
 k3s_setup
+k3s_labels
 kubectl_configuration
-helm_install
-metrics-server_install
-WEAVESCOPE="" weave-scope_install
-PROMETHEUS="" prometheus-operator_install
-ISTIO="y" istio_install
+DASHBOARD="y" dashboard_install
+#metrics-server_install # OBSOLETE DUE TO: https://github.com/rancher/k3s/issues/990
+WEAVESCOPE="y" weave-scope_install
+PROMETHEUS="y" prometheus-operator_install
+ISTIO="" istio_install # DISABLED as per https://istio.io/docs/setup/install/helm/ - Helm 3 is not supported because the chart uses the crd-install hook which was dropped in Helm 3.
+
