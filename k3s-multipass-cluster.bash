@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-INSTALL_K3S_VERSION=v1.17.2+k3s1
-
 dictionary() {
 # with 3G and 2 worker nodes no space left during istio installation
 # with 5G and 1 worker nodes no enough memory during istio installation
@@ -22,7 +20,7 @@ k3s_master_cloud_init() {
 cat << EOF
 #cloud-config
 runcmd:
- - '\curl -sfL https://get.k3s.io | K3S_KUBECONFIG_MODE="644" INSTALL_K3S_VERSION=${INSTALL_K3S_VERSION} sh -s - --node-taint node-role.kubernetes.io/master=effect:NoSchedule --no-deploy=traefik'
+ - '\curl -sfL https://get.k3s.io | K3S_KUBECONFIG_MODE="644" INSTALL_K3S_VERSION=${INSTALL_K3S_VERSION} sh -s - --node-taint node-role.kubernetes.io/master=effect:NoSchedule'
 EOF
 }
 
@@ -139,6 +137,8 @@ check_prerequisite()
   [[ ! "${OSTYPE}" == "darwin"* ]] && fatal "Prerequisites: Not running OSX"
   ### Check brew installed
   [ ! -f "`command -v brew`" ] && fatal "brew not installed, visit https://brew.sh"
+  ### Check jq installed
+  [ ! -f "`command -v jq`" ] && fatal "jq not installed, to install it: brew install jq"
   ### Check kubectl installed
   [ ! -f "`command -v kubectl`" ] && info "kubectl not installed, to install it: brew install kubernetes-cli" && KUBECTL_INSTALLED="false" || KUBECTL_INSTALLED="true"
   ### Check helm installed
@@ -163,7 +163,7 @@ k3s_release_info()
   require_var INSTALL_K3S_VERSION "INSTALL_K3S_VERSION must be defined"
   LATEST_K3S_VERSION=$(curl -s https://api.github.com/repos/rancher/k3s/releases/latest | grep -o '"tag_name": "[^"]*' | grep -o '[^"]*$')
   info "Latest release: $(echo ${LATEST_K3S_VERSION})"
-  [[ "${LATEST_K3S_VERSION}" == "${INSTALL_K3S_VERSION}" ]] && success "Installing latest release" || info "A newer release is available, installing ${INSTALL_K3S_VERSION}"
+  [[ "${LATEST_K3S_VERSION}" == "${INSTALL_K3S_VERSION}" ]] && success "Installing latest release" || (info "A newer release is available: ${LATEST_K3S_VERSION}" && info "Installing: ${INSTALL_K3S_VERSION}")
   info "$(curl -s https://api.github.com/repos/rancher/k3s/releases/tags/${INSTALL_K3S_VERSION} | jq -r '.body')"
 }
 
@@ -281,7 +281,7 @@ EOF
 
 dashboard_install()
 {
-  [[ -n $DASHBOARD ]] || return 0
+  [[ ${NO_DEPLOY_DASHBOARD} != "true" ]] || return 0
     #ref: https://kubernetes.io/docs/tasks/access-application-cluster/web-ui-dashboard/#deploying-the-dashboard-ui
     kubectl --kubeconfig=${KUBECONFIG_PATH} apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.0.0-beta8/aio/deploy/recommended.yaml
     # Create the dashboard service account
@@ -338,7 +338,7 @@ metrics-server_install()
 
 weave-scope_install()
 {
-  [[ -n $WEAVESCOPE ]] || return 0
+  [[ ${NO_DEPLOY_WEAVESCOPE} != "true" ]] || return 0
   info "[weavescope] Install"
   kubectl --kubeconfig=${KUBECONFIG_PATH} apply -f "https://cloud.weave.works/k8s/scope.yaml?k8s-version=$(kubectl --kubeconfig=${KUBECONFIG_PATH} version | base64 | tr -d '\n')&k8s-service-type=NodePort"
   kubectl --kubeconfig=${KUBECONFIG_PATH} rollout status deployment weave-scope-app --namespace weave -w
@@ -347,7 +347,7 @@ weave-scope_install()
 }
 
 prometheus-operator_install() {
-  [[ -n $PROMETHEUS ]] || return 0
+  [[ ${NO_DEPLOY_PROMETHEUS} != "true" ]] || return 0
   info "[prometheus] Create \"monitoring\" namespace"
   kubectl --kubeconfig=${KUBECONFIG_PATH} create namespace monitoring
   info "[prometheus] Add helm stable repository"
@@ -489,7 +489,7 @@ EOF
 
 istio_install()
 {
-  [[ -n $ISTIO ]] || return 0
+  [[ ${NO_DEPLOY_ISTIO} != "true" ]] || return 0
     if ${HELM_INSTALLED}; then
       info "[istio.io] Installation ref: https://istio.io/docs/setup/kubernetes/install/helm/"
       info "[istio.io] Create \"istio-system\" namespace"
@@ -540,10 +540,13 @@ cleanup()
 # --- help ---
 help () {
   echo "${BASENAME} accepted CLI arguments are:"
-  echo -e "\t[--help|-h ]\tprints this help"
-  # echo -e "\t[--version|-v <desired_version>] . When not defined it defaults to latest"
-  # echo -e "\te.g. --version v2.4.0  or -v latest"
+  echo -e "\t[-h|--help]\t\t\t\tPrints this help"
+  echo -e "\t[-v|--version <desired_version>]\tWhen not defined it defaults to ${INSTALL_K3S_VERSION} since it's tested"
+  echo -e "\t\t\t\t\t\te.g. --version v1.17.3+k3s1 or -v latest"
+  echo -e "\t[-d|--no-deploy <component>]\t\tWhen not defined it installs all 3rd parts components"
+  echo -e "\t\t\t\t\t\te.g. --no-deploy dashboard"
 }
+
 
 # --- main script ---
 # # Stop execution on any error
@@ -551,31 +554,62 @@ help () {
 # set -e
 
 # Parsing input arguments (if any)
-export INPUT_ARGUMENTS="${@}"
+# export INPUT_ARGUMENTS="${@}"
+
+NO_DEPLOY_ISTIO="true" # DISABLED as per https://istio.io/docs/setup/install/helm/ - Helm 3 is not supported because the chart uses the crd-install hook which was dropped in Helm 3
+INSTALL_K3S_VERSION=v1.17.3+k3s1
+
 set -u
 while [[ $# -gt 0 ]]; do
   case $1 in
-    # '--version'|-v)
-    #    shift
-    #    if [[ $# -ne 0 ]]; then
-    #        export DESIRED_VERSION="${1}"
-    #    else
-    #        echo -e "Please provide the desired version. e.g. --version v2.4.0 or -v latest"
-    #        exit 0
-    #    fi
-    #    ;;
-    '--help'|-h)
-       help
-       exit 0
-       ;;
+    -d | '--no-deploy' )
+      shift
+      if [[ $# -ne 0 ]]; then
+          case ${1} in
+            dashboard)
+              NO_DEPLOY_DASHBOARD="true"
+              ;;
+            weavescope)
+              NO_DEPLOY_WEAVESCOPE="true"
+              ;;
+            prometheus)
+              NO_DEPLOY_PROMETHEUS="true"
+              ;;
+            *)
+              echo "Component ${1} not supported"
+              exit 1
+              ;;
+          esac
+        else
+          echo -e "Please provide the component name. e.g. -d dashboard or --no-deploy dashboard"
+          exit 0
+      fi
+    ;;
+    -v | '--version' )
+      shift
+      if [[ $# -ne 0 ]]; then
+          if [ "${1}" == "latest" ]; then
+              export INSTALL_K3S_VERSION="$(curl -s https://api.github.com/repos/rancher/k3s/releases | jq -r '.[0].tag_name')"
+            else
+              export INSTALL_K3S_VERSION="${1}"
+          fi
+        else
+          echo -e "Please provide the desired version. e.g. --version v1.17.2+k3s1 or -v latest"
+          exit 0
+      fi
+      ;;
+    -h | '--help' )
+      help
+      exit 0
+      ;;
+    #-- ) shift; break ;;
     *) exit 1
-       ;;
+      ;;
   esac
   shift
 done
 set +u
 
-# Functions
 check_root
 check_prerequisite
 installation_multipass
@@ -583,9 +617,8 @@ k3s_release_info
 k3s_setup
 k3s_labels
 kubectl_configuration
-DASHBOARD="y" dashboard_install
+dashboard_install
 #metrics-server_install # OBSOLETE DUE TO: https://github.com/rancher/k3s/issues/990
-WEAVESCOPE="y" weave-scope_install
-PROMETHEUS="y" prometheus-operator_install
-ISTIO="" istio_install # DISABLED as per https://istio.io/docs/setup/install/helm/ - Helm 3 is not supported because the chart uses the crd-install hook which was dropped in Helm 3.
-
+weave-scope_install
+prometheus-operator_install
+istio_install
